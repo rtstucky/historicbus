@@ -122,6 +122,40 @@
             margin-bottom: 10px;
         }
 
+        /* ── Tooltip ── */
+        .info-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 1px solid currentColor;
+            font-size: 9px;
+            font-weight: 700;
+            cursor: default;
+            margin-left: 4px;
+            vertical-align: middle;
+            color: rgba(0,0,0,0.4);
+            position: relative;
+        }
+        .info-btn:hover { color: black; }
+        .info-popup {
+            display: none;
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            background: white;
+            border: 1px solid black;
+            padding: 6px 8px;
+            font-size: 10px;
+            line-height: 1.5;
+            width: 200px;
+            z-index: 1000;
+            pointer-events: none;
+        }
+        .info-btn:hover .info-popup { display: block; }
+
         /* ── Summary grid ── */
         .summary-grid {
             display: grid;
@@ -204,6 +238,7 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
 <script>
     const OLD_COLOR        = '#e07b39';
     const NEW_COLOR        = '#4a90d9';
@@ -242,43 +277,150 @@
         document.getElementById(btnId).classList.toggle('off', !nowOn);
     }
 
-    // ── Load GeoJSON ──────────────────────────────────────────
-    fetch('old_routes.geojson')
-        .then(r => r.json())
-        .then(data => {
-            oldLayer = L.geoJSON(data, {
-                style: { color: OLD_COLOR, weight: 4, opacity: 0.85 },
-                onEachFeature(feature, layer) {
-                    const route = String(feature.properties.Route ?? '').replace('.0','').trim();
-                    layer.bindTooltip(`1943 Bus — Route ${route}`, { sticky: true });
-                }
-            }).addTo(map);
+    // ── Turf helpers ──────────────────────────────────────────
+    function featureLengthMiles(feature) {
+        return turf.length(feature, { units: 'miles' });
+    }
+
+    function calcStats(features, headwayKey, popKey, s) {
+        const lengths = features.map(f => featureLengthMiles(f));
+        const totalMiles = lengths.reduce((a, b) => a + b, 0);
+        const avgMiles = totalMiles / features.length;
+
+        let vehicleMiles = 0;
+        const headways = [];
+        features.forEach((f, i) => {
+            const headway = f.properties[headwayKey];
+            if (headway) {
+                vehicleMiles += (1080.0 / headway + 1) * lengths[i];
+                headways.push(headway);
+            }
+        });
+        const avgHeadway = headways.length
+            ? (headways.reduce((a, b) => a + b, 0) / headways.length).toFixed(1)
+            : '—';
+
+        const pop = s[popKey];
+        return {
+            totalMiles: totalMiles.toFixed(1),
+            avgMiles: avgMiles.toFixed(1),
+            avgHeadway,
+            vehicleMiles: Math.round(vehicleMiles),
+            vmiPer1k: (vehicleMiles / (pop / 1000)).toFixed(1),
+            miPer1k: (totalMiles / (pop / 1000)).toFixed(2)
+        };
+    }
+
+    // ── Load GeoJSON + compute stats ─────────────────────────
+    Promise.all([
+        fetch('merged_routes.geojson').then(r => r.json()),
+        fetch('streetcar_routes.geojson').then(r => r.json()),
+        fetch('stats.json').then(r => r.json())
+    ]).then(([merged, streetcars, s]) => {
+        const oldFeatures = merged.features.filter(f => f.properties.year === '1943');
+        const newFeatures = merged.features.filter(f => f.properties.year === '2025');
+
+        // ── Map layers ───────────────────────────────────────
+        oldLayer = L.geoJSON({ ...merged, features: oldFeatures }, {
+            style: { color: OLD_COLOR, weight: 4, opacity: 0.85 },
+            onEachFeature(feature, layer) {
+                const p = feature.properties;
+                const name    = p.Name ?? '';
+                const headway = p.avg_headway_minutes != null ? p.avg_headway_minutes + ' min' : '—';
+                const trips   = p.Round_trips_daily ?? '—';
+                const pax     = p.passengers_per_day != null ? Number(p.passengers_per_day).toLocaleString() : '—';
+                layer.bindTooltip(
+                    `<strong>${name}</strong><br>
+                     Avg headway: ${headway}<br>
+                     Daily round trips: ${trips}<br>
+                     Passengers/day: ${pax}`,
+                    { sticky: true }
+                );
+            }
+        }).addTo(map);
+
+        newLayer = L.geoJSON({ ...merged, features: newFeatures }, {
+            style: { color: NEW_COLOR, weight: 4, opacity: 0.85 },
+            onEachFeature(feature, layer) {
+                const route = String(feature.properties.Route ?? '').trim();
+                const name  = feature.properties.Name ?? '';
+                layer.bindTooltip(`Current Bus — Route ${route}${name ? ' · ' + name : ''}`, { sticky: true });
+            }
         });
 
-    fetch('transit_routes.geojson')
-        .then(r => r.json())
-        .then(data => {
-            newLayer = L.geoJSON(data, {
-                style: { color: NEW_COLOR, weight: 4, opacity: 0.85 },
-                onEachFeature(feature, layer) {
-                    const route = String(feature.properties.Route ?? '').trim();
-                    const name  = feature.properties.NAME ?? '';
-                    layer.bindTooltip(`Current Bus — Route ${route}${name ? ' · ' + name : ''}`, { sticky: true });
-                }
-            }); // not added to map by default
+        streetcarLayer = L.geoJSON(streetcars, {
+            style: { color: STREETCAR_COLOR, weight: 4, opacity: 0.85, dashArray: '6 4' },
+            onEachFeature(feature, layer) {
+                const year = feature.properties.Year ?? '';
+                layer.bindTooltip(`Streetcar — ${year}`, { sticky: true });
+            }
         });
 
-    fetch('streetcar_routes.geojson')
-        .then(r => r.json())
-        .then(data => {
-            streetcarLayer = L.geoJSON(data, {
-                style: { color: STREETCAR_COLOR, weight: 4, opacity: 0.85, dashArray: '6 4' },
-                onEachFeature(feature, layer) {
-                    const year = feature.properties.Year ?? '';
-                    layer.bindTooltip(`Streetcar — ${year}`, { sticky: true });
-                }
-            }); // not added to map by default
-        });
+        // ── Compute stats from geometry ───────────────────────
+        const oldStats = calcStats(oldFeatures, 'avg_headway_minutes', 'pop_1943', s);
+        const newStats = calcStats(newFeatures, 'avg_headway_minutes', 'pop_current', s);
+
+        const oldDailyPax = oldFeatures.reduce((sum, f) => {
+            return sum + (f.properties.passengers_per_day ?? 0);
+        }, 0);
+
+        const scLengths = streetcars.features.map(f => featureLengthMiles(f));
+        const scTotal = scLengths.reduce((a, b) => a + b, 0).toFixed(1);
+        const scPer1k = (scTotal / (s.pop_1925 / 1000)).toFixed(2);
+
+        // ── Render summary ────────────────────────────────────
+        document.getElementById('summary-grid').innerHTML = `
+            <div class="col-header"></div>
+            <div class="col-header" style="color:var(--streetcar-color);">1925</div>
+            <div class="col-header" style="color:var(--old-color);">1943</div>
+            <div class="col-header" style="color:var(--new-color);">Today</div>
+
+            <div class="row-label">Total miles<span class="info-btn">?<span class="info-popup">Sum of the length of each individual route's linestring.</span></span></div>
+            <div class="val-sc">${scTotal}</div>
+            <div class="val-old">${oldStats.totalMiles}</div>
+            <div class="val-new">${newStats.totalMiles}</div>
+
+            <div class="row-label">Average route length<span class="info-btn">?<span class="info-popup">The average length of each individual route's linestring.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${oldStats.avgMiles} mi</div>
+            <div class="val-new">${newStats.avgMiles} mi</div>
+
+            <div class="row-label">Average headway time<span class="info-btn">?<span class="info-popup">Today's values taken from each route's timetable and averaged over a weekday. 1943 values published in the Major Street Plan as "base headway" for an average day in May.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${oldStats.avgHeadway} min</div>
+            <div class="val-new">${newStats.avgHeadway} min</div>
+
+            <div class="row-label">Population<span class="info-btn">?<span class="info-popup">Taken from Wikipedia. Includes city proper only.</span></span></div>
+            <div class="val-sc">${s.pop_1925.toLocaleString()}</div>
+            <div class="val-old">${s.pop_1943.toLocaleString()}</div>
+            <div class="val-new">${s.pop_current.toLocaleString()}</div>
+
+            <div class="row-label">Miles of network per 1,000 people<span class="info-btn">?<span class="info-popup">Total miles of the network divided by population per 1,000.</span></span></div>
+            <div class="val-sc">${scPer1k}</div>
+            <div class="val-old">${oldStats.miPer1k}</div>
+            <div class="val-new">${newStats.miPer1k}</div>
+
+            <div class="row-label">Network miles per day<span class="info-btn">?<span class="info-popup">Assumes 1,080 minutes of operation (4am–10pm). Trip frequency is derived from headways, multiplied by each route's length, then summed across all routes.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${oldStats.vehicleMiles.toLocaleString()}</div>
+            <div class="val-new">${newStats.vehicleMiles.toLocaleString()}</div>
+
+            <div class="row-label">Network miles per day per 1,000 people<span class="info-btn">?<span class="info-popup">Network miles per day divided by population per 1,000.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${oldStats.vmiPer1k}</div>
+            <div class="val-new">${newStats.vmiPer1k}</div>
+
+            <div class="row-label">Daily passengers in May<span class="info-btn">?<span class="info-popup">Today's values provided by Wichita Transit for the entire month of May, then divided by 31. 1943 values published in the Major Street Plan.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${oldDailyPax.toLocaleString()}</div>
+            <div class="val-new">${s.cur_daily_passengers.toLocaleString()}</div>
+
+            <div class="row-label">Passengers as % of population<span class="info-btn">?<span class="info-popup">Daily passengers in May divided by total city population.</span></span></div>
+            <div class="val-sc">—</div>
+            <div class="val-old">${(oldDailyPax / s.pop_1943 * 100).toFixed(1)}%</div>
+            <div class="val-new">${(s.cur_daily_passengers / s.pop_current * 100).toFixed(1)}%</div>
+        `;
+    });
 
     // ── Log lat/lng on click for annotations ─────────────────
     map.on('click', e => console.log(e.latlng.lat, e.latlng.lng));
@@ -335,37 +477,6 @@
         })
         .catch(() => {}); // silently skip if no annotations.json yet
 
-    // ── Summary ───────────────────────────────────────────────
-    fetch('stats.json')
-        .then(r => r.json())
-        .then(s => {
-            document.getElementById('summary-grid').innerHTML = `
-                <div class="col-header"></div>
-                <div class="col-header" style="color:var(--streetcar-color);">1925</div>
-                <div class="col-header" style="color:var(--old-color);">1943</div>
-                <div class="col-header" style="color:var(--new-color);">Today</div>
-
-                <div class="row-label">Total miles</div>
-                <div class="val-sc">${s.sc_total}</div>
-                <div class="val-old">${s.old_total}</div>
-                <div class="val-new">${s.cur_total}</div>
-
-                <div class="row-label">Avg route</div>
-                <div class="val-sc">${s.sc_avg}</div>
-                <div class="val-old">${s.old_avg} mi</div>
-                <div class="val-new">${s.cur_avg} mi</div>
-
-                <div class="row-label">Population</div>
-                <div class="val-sc">${s.pop_1925.toLocaleString()}</div>
-                <div class="val-old">${s.pop_1943.toLocaleString()}</div>
-                <div class="val-new">${s.pop_current.toLocaleString()}</div>
-
-                <div class="row-label">Mi / 1k pop</div>
-                <div class="val-sc">${s.sc_per_1k}</div>
-                <div class="val-old">${s.old_per_1k}</div>
-                <div class="val-new">${s.cur_per_1k}</div>
-            `;
-        });
 </script>
 </body>
 </html>

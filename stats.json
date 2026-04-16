@@ -192,5 +192,10 @@
   "pop_current": 397532,
   "old_per_1k": 0.64,
   "sc_per_1k": 0.31,
-  "cur_per_1k": 0.82
+  "cur_per_1k": 0.82,
+  "old_vehicle_miles": 6558,
+  "cur_vehicle_miles": 6898,
+  "old_vmi_per_1k": 57.0,
+  "cur_vmi_per_1k": 17.4,
+  "cur_daily_passengers": 2854
 }
